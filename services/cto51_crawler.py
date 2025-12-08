@@ -76,10 +76,10 @@ class CTO51Crawler:
     
     def setup_browser(self):
         """Setup Playwright browser"""
-        logger.info("Starting Chromium browser with UI...")
+        logger.info("Starting Chromium browser in headless mode...")
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(
-            headless=False,  # 显示浏览器窗口
+            headless=True,  # 无头模式
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
@@ -101,7 +101,7 @@ class CTO51Crawler:
         """)
         
         self.page = context.new_page()
-        logger.info("✅ Chromium browser started successfully (with UI)")
+        logger.info("✅ Chromium browser started successfully (headless mode)")
     
     def _random_delay(self, min_sec: float = 2, max_sec: float = 5):
         """Random delay - simulate human behavior"""
