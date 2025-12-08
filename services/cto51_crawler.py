@@ -371,8 +371,15 @@ class CTO51Crawler:
         total_valid_articles = 0
         
         try:
-            self.page.wait_for_selector("ul.infinite-list", timeout=10000)
+            # 增加等待时间，并等待网络空闲
+            logger.info("Waiting for article list to load...")
+            self.page.wait_for_load_state('networkidle', timeout=30000)
+            self.page.wait_for_selector("ul.infinite-list", timeout=20000)
+            
+            # 滚动加载更多内容
             self._human_like_scroll()
+            time.sleep(2)  # 等待动态内容加载
+            
             list_items = self.page.query_selector_all("ul.infinite-list > li")
             logger.info(f"Found {len(list_items)} article items")
             
@@ -458,7 +465,7 @@ class CTO51Crawler:
                 
                 # Open in new page
                 new_page = self.page.context.new_page()
-                new_page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                new_page.goto(url, wait_until='networkidle', timeout=60000)
                 
                 # Wait for content
                 try:
@@ -585,7 +592,8 @@ class CTO51Crawler:
         try:
             self.setup_browser()
             logger.info(f"Visiting list page: {self.base_url}")
-            self.page.goto(self.base_url, wait_until='domcontentloaded')
+            # 等待页面完全加载
+            self.page.goto(self.base_url, wait_until='networkidle', timeout=60000)
             logger.info("✅ List page loaded")
             
             # 首次加载后，模拟真人浏览行为
