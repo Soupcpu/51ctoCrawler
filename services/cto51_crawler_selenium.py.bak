@@ -1,11 +1,17 @@
-"""51CTO Crawler Service - Playwright Version"""
-from playwright.sync_api import sync_playwright, Page, Browser
+"""51CTO Crawler Service"""
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 import time
 import random
 import hashlib
 import logging
 import json
-import os
 from datetime import datetime
 from typing import List, Dict, Optional, Callable
 
@@ -13,18 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 class CTO51Crawler:
-    """51CTO Article Crawler using Playwright"""
+    """51CTO Article Crawler"""
     
     def __init__(self, min_article_id: int = 33500, data_file: str = "data/51cto_articles.json"):
         self.base_url = "https://ost.51cto.com/postlist"
         self.source = "51CTO"
         self.category = "技术文章"
         self.min_article_id = min_article_id
+        self.driver = None
         self.data_file = data_file
-        self.scraped_urls = set()
-        self.playwright = None
-        self.browser = None
-        self.page = None
+        self.scraped_urls = set()  # Track crawled URLs
         
         # Load existing data
         self._load_existing_data()
@@ -32,6 +36,7 @@ class CTO51Crawler:
     def _load_existing_data(self):
         """Load existing crawled data from file"""
         try:
+            import os
             if os.path.exists(self.data_file):
                 with open(self.data_file, 'r', encoding='utf-8') as f:
                     existing_articles = json.load(f)
@@ -47,6 +52,7 @@ class CTO51Crawler:
     def _save_data(self, articles: List[Dict]):
         """Save articles to file"""
         try:
+            import os
             os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
             
             # Load existing data
@@ -73,35 +79,46 @@ class CTO51Crawler:
                 
         except Exception as e:
             logger.error(f"❌ Failed to save data: {e}")
-    
-    def setup_browser(self):
-        """Setup Playwright browser"""
-        logger.info("Starting Chromium browser in headless mode...")
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
-            headless=True,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-dev-shm-usage'
-            ]
-        )
         
-        # Create context with anti-detection
-        context = self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-        )
+    def setup_driver(self):
+        """Setup Chrome driver"""
+        logger.info("Starting Chrome browser in headless mode...")
+        options = webdriver.ChromeOptions()
         
-        # Add anti-detection script
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-        """)
+        # Headless mode - 无头模式，不显示浏览器窗口
+        options.add_argument('--headless=new')  # 新版无头模式
+        options.add_argument('--disable-gpu')  # 禁用GPU加速
+        options.add_argument('--no-sandbox')  # 禁用沙箱
+        options.add_argument('--disable-dev-shm-usage')  # 解决资源限制
         
-        self.page = context.new_page()
-        logger.info("✅ Chromium browser started successfully (headless mode)")
+        # Window size for headless mode
+        options.add_argument('--window-size=1920,1080')
+        
+        # Anti-detection
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+        options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        # Suppress logs
+        options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        options.add_argument('--log-level=3')  # 只显示严重错误
+        options.add_argument('--silent')
+        
+        # Use webdriver-manager to automatically manage ChromeDriver
+        try:
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
+        except Exception as e:
+            logger.warning(f"Failed to use webdriver-manager: {e}")
+            logger.info("Trying to use system Chrome...")
+            # Fallback to system Chrome
+            self.driver = webdriver.Chrome(options=options)
+        
+        self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+        })
+        logger.info("Chrome browser started successfully (headless mode)")
     
     def _random_delay(self, min_sec: float = 2, max_sec: float = 5):
         """Random delay"""
@@ -110,7 +127,7 @@ class CTO51Crawler:
     def _human_like_scroll(self):
         """Human-like scrolling"""
         try:
-            total_height = self.page.evaluate("document.body.scrollHeight")
+            total_height = self.driver.execute_script("return document.body.scrollHeight")
             current_position = 0
             max_scrolls = 10
             scroll_count = 0
@@ -118,11 +135,11 @@ class CTO51Crawler:
             while current_position < total_height and scroll_count < max_scrolls:
                 scroll_distance = random.randint(300, 600)
                 current_position += scroll_distance
-                self.page.evaluate(f"window.scrollTo(0, {current_position})")
+                self.driver.execute_script(f"window.scrollTo(0, {current_position});")
                 time.sleep(random.uniform(0.3, 0.8))
                 scroll_count += 1
                 
-                new_height = self.page.evaluate("document.body.scrollHeight")
+                new_height = self.driver.execute_script("return document.body.scrollHeight")
                 if new_height > total_height:
                     total_height = new_height
         except Exception as e:
@@ -131,26 +148,27 @@ class CTO51Crawler:
     def _extract_content(self) -> List[Dict]:
         """Extract article content"""
         try:
-            content_container = self.page.query_selector(".posts-content")
-            if not content_container:
-                logger.warning("Content container not found")
-                return []
+            content_container = self.driver.find_element(By.CSS_SELECTOR, ".posts-content")
         except:
             logger.warning("Content container not found")
             return []
         
         js_script = r"""
-(element) => {
+function extractContent(element) {
     let blocks = [];
     let processedNodes = new Set();
     
     function getCodeLanguage(node) {
+        // Try to detect language from class names
         const classNames = node.className || '';
+        
+        // Common patterns: language-python, lang-python, python, brush:python
         const langMatch = classNames.match(/(?:language-|lang-|brush:)?(python|javascript|java|cpp|c\+\+|csharp|c#|php|ruby|go|rust|swift|kotlin|typescript|sql|bash|shell|html|css|json|xml|yaml)/i);
         if (langMatch) {
             return langMatch[1].toLowerCase();
         }
         
+        // Check code element inside pre
         if (node.nodeName === 'PRE') {
             const codeElem = node.querySelector('code');
             if (codeElem) {
@@ -166,9 +184,14 @@ class CTO51Crawler:
     }
     
     function getCodeText(node) {
+        // Clone node to avoid modifying original
         const clone = node.cloneNode(true);
+        
+        // Remove line number elements
         const lineNumbers = clone.querySelectorAll('.pre-numbering, .line-numbers, .line-number, ul.pre-numbering');
         lineNumbers.forEach(elem => elem.remove());
+        
+        // Get text content
         return clone.textContent.trim();
     }
     
@@ -179,6 +202,7 @@ class CTO51Crawler:
         if (node.nodeType === Node.ELEMENT_NODE) {
             const tagName = node.nodeName;
             
+            // Handle IMG tags (highest priority)
             if (tagName === 'IMG') {
                 const src = node.src || node.getAttribute('data-src') || node.getAttribute('data-original') || '';
                 if (src && src.startsWith('http')) {
@@ -187,6 +211,7 @@ class CTO51Crawler:
                 return;
             }
             
+            // Handle PRE/CODE blocks (high priority - before DIV)
             if (tagName === 'PRE') {
                 processedNodes.add(node);
                 const codeText = getCodeText(node);
@@ -201,10 +226,11 @@ class CTO51Crawler:
                 return;
             }
             
+            // Skip standalone CODE if already processed in PRE
             if (tagName === 'CODE') {
                 const parent = node.parentElement;
                 if (parent && parent.nodeName === 'PRE') {
-                    return;
+                    return; // Already handled by PRE
                 }
                 processedNodes.add(node);
                 const codeText = getCodeText(node);
@@ -219,54 +245,68 @@ class CTO51Crawler:
                 return;
             }
             
+            // Handle P, H1-H6 tags
             if (['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(tagName)) {
+                // Check if this element contains images or code blocks
                 const images = node.querySelectorAll('img');
                 const codeBlocks = node.querySelectorAll('pre, code');
                 
                 if (images.length > 0 || codeBlocks.length > 0) {
+                    // Process children separately to handle mixed content
                     for (let child of node.childNodes) {
                         processNode(child);
                     }
                     return;
                 }
                 
+                // No images or code, get text content
                 let text = node.textContent.trim();
+                // Filter out image filenames (like "cke_1313.png")
                 if (text && text.length > 10 && !text.match(/^[\w\-]+\.(png|jpg|jpeg|gif|svg|webp)$/i)) {
                     blocks.push({type: 'text', value: text});
                 }
                 return;
             }
             
+            // Handle DIV tags (check for code blocks first)
             if (tagName === 'DIV') {
+                // Check if this DIV contains code blocks
                 const codeBlocks = node.querySelectorAll('pre, code');
                 if (codeBlocks.length > 0) {
+                    // Process children to extract code blocks
                     for (let child of node.childNodes) {
                         processNode(child);
                     }
                     return;
                 }
                 
+                // Check if this DIV contains images
                 const images = node.querySelectorAll('img');
                 if (images.length > 0) {
+                    // Process children separately
                     for (let child of node.childNodes) {
                         processNode(child);
                     }
                     return;
                 }
                 
+                // No special content, process children normally
                 for (let child of node.childNodes) {
                     processNode(child);
                 }
                 return;
             }
             
+            // For other elements, process children
             for (let child of node.childNodes) {
                 processNode(child);
             }
         }
         
+        // Handle text nodes (only if not just whitespace)
         if (node.nodeType === Node.TEXT_NODE) {
             let text = node.textContent.trim();
+            // Filter out image filenames and short text
             if (text && text.length > 10 && !text.match(/^[\w\-]+\.(png|jpg|jpeg|gif|svg|webp)$/i)) {
                 blocks.push({type: 'text', value: text});
             }
@@ -276,9 +316,10 @@ class CTO51Crawler:
     processNode(element);
     return blocks;
 }
+return extractContent(arguments[0]);
 """
         try:
-            content_blocks = content_container.evaluate(js_script)
+            content_blocks = self.driver.execute_script(js_script, content_container)
             valid_blocks = []
             for block in content_blocks:
                 if isinstance(block, dict) and 'type' in block and 'value' in block:
@@ -288,7 +329,7 @@ class CTO51Crawler:
         except Exception as e:
             logger.error(f"Content extraction failed: {e}")
             try:
-                text = content_container.text_content().strip()
+                text = content_container.text.strip()
                 if text:
                     return [{"type": "text", "value": text}]
             except:
@@ -355,17 +396,16 @@ class CTO51Crawler:
         total_valid_articles = 0
         
         try:
-            self.page.wait_for_selector("ul.infinite-list", timeout=10000)
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "ul.infinite-list"))
+            )
             self._human_like_scroll()
-            list_items = self.page.query_selector_all("ul.infinite-list > li")
+            list_items = self.driver.find_elements(By.CSS_SELECTOR, "ul.infinite-list > li")
             logger.info(f"Found {len(list_items)} article items")
             
             for idx, item in enumerate(list_items, 1):
                 try:
-                    link_elem = item.query_selector("a[href*='posts']")
-                    if not link_elem:
-                        continue
-                    
+                    link_elem = item.find_element(By.CSS_SELECTOR, "a[href*='posts']")
                     url = link_elem.get_attribute('href')
                     
                     article_id = None
@@ -375,10 +415,10 @@ class CTO51Crawler:
                         pass
                     
                     try:
-                        title_elem = item.query_selector("h3.title-h3")
-                        title = title_elem.text_content().strip() if title_elem else ""
+                        title_elem = item.find_element(By.CSS_SELECTOR, "h3.title-h3")
+                        title = title_elem.text.strip()
                     except:
-                        title = link_elem.text_content().strip().split('\n')[0]
+                        title = link_elem.text.strip().split('\n')[0]
                     
                     if not title:
                         title = "无标题"
@@ -396,6 +436,7 @@ class CTO51Crawler:
                         continue
                     
                     article_elements.append({
+                        'element': link_elem,
                         'url': url,
                         'title': title,
                         'article_id': article_id
@@ -415,16 +456,17 @@ class CTO51Crawler:
             return {'articles': [], 'all_old': False}
     
     def _crawl_single_article(self, article_info: Dict) -> Optional[Dict]:
-        """Crawl single article"""
+        """Crawl single article with retry mechanism"""
         url = article_info['url']
         title = article_info['title']
         
-        max_retries = 2
+        # Maximum retry attempts for clicking article
+        max_click_retries = 2
         
-        for attempt in range(max_retries):
+        for click_attempt in range(max_click_retries):
             try:
-                if attempt > 0:
-                    logger.warning(f"Retry attempt {attempt + 1}/{max_retries} for: {title}")
+                if click_attempt > 0:
+                    logger.warning(f"Retry attempt {click_attempt + 1}/{max_click_retries} for: {title}")
                 
                 article_data = {
                     'title': title,
@@ -434,38 +476,89 @@ class CTO51Crawler:
                     'content': []
                 }
                 
-                logger.info(f"Opening article: {title}")
-                
-                # Open in new page
-                new_page = self.page.context.new_page()
-                new_page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                
-                # Wait for content
+                # Get fresh element reference (important for retries)
                 try:
-                    new_page.wait_for_selector(".posts-content", timeout=20000)
-                    logger.info("✅ Article content loaded successfully")
-                except:
-                    logger.warning(f"⚠️ Content not loaded within 20 seconds")
-                    new_page.close()
-                    if attempt < max_retries - 1:
+                    # Find the article link again
+                    link_elements = self.driver.find_elements(By.CSS_SELECTOR, f"a[href='{url}']")
+                    if not link_elements:
+                        logger.error(f"Cannot find article link for retry: {url}")
+                        if click_attempt < max_click_retries - 1:
+                            continue
+                        else:
+                            return None
+                    title_element = link_elements[0]
+                except Exception as e:
+                    logger.error(f"Failed to find article element: {e}")
+                    if click_attempt < max_click_retries - 1:
                         self._random_delay(2, 3)
                         continue
                     else:
                         return None
                 
-                # Scroll
-                new_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                self._random_delay(1, 2)
+                logger.info(f"Clicking article: {title}")
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                    title_element
+                )
+                self._random_delay(0.8, 2.0)
+                
+                ActionChains(self.driver).move_to_element(title_element).perform()
+                self._random_delay(0.5, 1.5)
+                
+                main_window = self.driver.current_window_handle
+                title_element.click()
+                logger.info("Clicked, waiting for page load...")
+                self._random_delay(2, 4)
+                
+                if len(self.driver.window_handles) > 1:
+                    self.driver.switch_to.window(self.driver.window_handles[-1])
+                
+                # Try to load page content with 20 second timeout
+                content_loaded = False
+                try:
+                    logger.info("Waiting for article content (20 second timeout)...")
+                    WebDriverWait(self.driver, 20).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, ".posts-content"))
+                    )
+                    content_loaded = True
+                    logger.info("✅ Article content loaded successfully")
+                except TimeoutException:
+                    logger.warning(f"⚠️ Content not loaded within 20 seconds")
+                    
+                    # Close current window/tab and return to main window
+                    try:
+                        if len(self.driver.window_handles) > 1:
+                            self.driver.close()
+                            self.driver.switch_to.window(main_window)
+                        else:
+                            self.driver.back()
+                        self._random_delay(1, 2)
+                    except:
+                        pass
+                    
+                    # If not last attempt, retry
+                    if click_attempt < max_click_retries - 1:
+                        logger.info(f"🔄 Retrying article click...")
+                        self._random_delay(2, 3)
+                        continue
+                    else:
+                        logger.error(f"❌ Failed to load content after {max_click_retries} attempts")
+                        return None
+                
+                if not content_loaded:
+                    continue
+                
+                # Content loaded successfully, proceed with extraction
+                self._human_like_scroll()
                 
                 # Extract author
                 try:
                     for selector in [".name", ".author", ".post-author"]:
                         try:
-                            author_elem = new_page.query_selector(selector)
-                            if author_elem:
-                                article_data['author'] = author_elem.text_content().strip()
-                                if article_data['author']:
-                                    break
+                            author_elem = self.driver.find_element(By.CSS_SELECTOR, selector)
+                            article_data['author'] = author_elem.text.strip()
+                            if article_data['author']:
+                                break
                         except:
                             continue
                 except:
@@ -475,11 +568,10 @@ class CTO51Crawler:
                 try:
                     for selector in ["time", ".publish-time", ".post-time"]:
                         try:
-                            time_elem = new_page.query_selector(selector)
-                            if time_elem:
-                                article_data['publish_time'] = time_elem.text_content().strip()
-                                if article_data['publish_time']:
-                                    break
+                            time_elem = self.driver.find_element(By.CSS_SELECTOR, selector)
+                            article_data['publish_time'] = time_elem.text.strip()
+                            if article_data['publish_time']:
+                                break
                         except:
                             continue
                 except:
@@ -487,18 +579,29 @@ class CTO51Crawler:
                 
                 # Extract content
                 logger.info("Extracting article content...")
-                content_container = new_page.query_selector(".posts-content")
-                if content_container:
-                    article_data['content'] = self._extract_content()
+                article_data['content'] = self._extract_content()
                 
-                # Verify content
+                # Verify content is not empty
                 if not article_data['content'] or len(article_data['content']) == 0:
                     logger.warning(f"⚠️ Extracted content is empty")
-                    new_page.close()
-                    if attempt < max_retries - 1:
+                    
+                    # Close and retry if not last attempt
+                    try:
+                        if len(self.driver.window_handles) > 1:
+                            self.driver.close()
+                            self.driver.switch_to.window(main_window)
+                        else:
+                            self.driver.back()
+                        self._random_delay(1, 2)
+                    except:
+                        pass
+                    
+                    if click_attempt < max_click_retries - 1:
+                        logger.info(f"🔄 Content empty, retrying...")
                         self._random_delay(2, 3)
                         continue
                     else:
+                        logger.error(f"❌ Content still empty after {max_click_retries} attempts")
                         return None
                 
                 logger.info(f"✅ Successfully crawled article!")
@@ -508,33 +611,75 @@ class CTO51Crawler:
                 
                 formatted_article = self._format_article(article_data)
                 
-                new_page.close()
-                self._random_delay(1, 2)
+                # Close window and return to main
+                try:
+                    if len(self.driver.window_handles) > 1:
+                        self.driver.close()
+                        self.driver.switch_to.window(main_window)
+                    else:
+                        self.driver.back()
+                    self._random_delay(1, 2)
+                except Exception as e:
+                    logger.warning(f"Return to list page error: {e}")
                 
                 return formatted_article
                 
             except Exception as e:
-                logger.error(f"Crawl attempt {attempt + 1} failed: {title}")
+                logger.error(f"Crawl attempt {click_attempt + 1} failed: {title}")
                 logger.error(f"  Error: {e}")
                 
-                if attempt < max_retries - 1:
+                # Close window and return to main
+                try:
+                    if len(self.driver.window_handles) > 1:
+                        self.driver.close()
+                        self.driver.switch_to.window(main_window)
+                    else:
+                        self.driver.back()
+                    self._random_delay(1, 2)
+                except:
+                    pass
+                
+                # If not last attempt, retry
+                if click_attempt < max_click_retries - 1:
+                    logger.info(f"🔄 Retrying due to error...")
                     self._random_delay(2, 3)
                     continue
                 else:
+                    logger.error(f"❌ Failed after {max_click_retries} attempts")
                     return None
         
+        # Should not reach here
         return None
     
     def _click_next_page(self) -> bool:
         """Click next page button"""
         try:
-            self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             self._random_delay(1, 2)
             
-            next_button = self.page.query_selector("a:has-text('下一页'), button:has-text('下一页')")
+            next_button_selectors = [
+                "//a[contains(text(), '下一页')]",
+                "//a[contains(@class, 'next')]",
+                "//button[contains(text(), '下一页')]",
+                "//li[contains(@class, 'next')]//a",
+            ]
+            
+            next_button = None
+            for selector in next_button_selectors:
+                try:
+                    next_button = WebDriverWait(self.driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+                    if next_button:
+                        break
+                except:
+                    continue
             
             if next_button:
-                next_button.scroll_into_view_if_needed()
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                    next_button
+                )
                 self._random_delay(0.5, 1)
                 next_button.click()
                 logger.info("Clicked next page")
@@ -553,12 +698,12 @@ class CTO51Crawler:
                        batch_size: int = 5) -> List[Dict]:
         """Crawl all pages"""
         all_articles = []
-        batch_articles = []
+        batch_articles = []  # Initialize here to ensure it's available in finally block
         
         try:
-            self.setup_browser()
+            self.setup_driver()
             logger.info(f"Visiting list page: {self.base_url}")
-            self.page.goto(self.base_url, wait_until='domcontentloaded')
+            self.driver.get(self.base_url)
             logger.info("List page loaded")
             self._random_delay(3, 6)
             
@@ -627,6 +772,7 @@ class CTO51Crawler:
                 
                 if max_pages and page_count >= max_pages:
                     logger.warning(f"⚠️ Reached max pages limit: {max_pages}")
+                    logger.info(f"💡 Tip: Increase MAX_PAGES in config or use MIN_ARTICLE_ID to control crawling")
                     break
                 
                 logger.info(f"\nPreparing to go to next page...")
@@ -696,18 +842,22 @@ class CTO51Crawler:
             return all_articles
             
         finally:
-            # Close browser
-            if self.browser:
+            # Final save attempt for any remaining articles
+            if batch_articles:
+                logger.info(f"💾 Final save: {len(batch_articles)} articles...")
                 try:
-                    self.browser.close()
-                    logger.info("Browser closed")
-                except:
-                    pass
+                    if batch_callback:
+                        batch_callback(batch_articles.copy())
+                    self._save_data(batch_articles.copy())
+                    logger.info(f"✅ Final save successful")
+                except Exception as save_error:
+                    logger.error(f"❌ Final save failed: {save_error}")
             
-            if self.playwright:
+            # Close browser
+            if self.driver:
                 try:
-                    self.playwright.stop()
-                    logger.info("Playwright stopped")
+                    self.driver.quit()
+                    logger.info("Browser closed")
                 except:
                     pass
             
