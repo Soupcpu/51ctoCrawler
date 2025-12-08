@@ -104,22 +104,38 @@ class CTO51Crawler:
         logger.info("✅ Chromium browser started successfully (with UI)")
     
     def _random_delay(self, min_sec: float = 2, max_sec: float = 5):
-        """Random delay"""
-        time.sleep(random.uniform(min_sec, max_sec))
+        """Random delay - simulate human behavior"""
+        delay = random.uniform(min_sec, max_sec)
+        logger.debug(f"Waiting {delay:.2f} seconds...")
+        time.sleep(delay)
     
     def _human_like_scroll(self):
-        """Human-like scrolling"""
+        """Human-like scrolling - simulate real user behavior"""
         try:
             total_height = self.page.evaluate("document.body.scrollHeight")
             current_position = 0
-            max_scrolls = 10
+            max_scrolls = random.randint(8, 15)  # 随机滚动次数
             scroll_count = 0
             
             while current_position < total_height and scroll_count < max_scrolls:
-                scroll_distance = random.randint(300, 600)
+                # 随机滚动距离，模拟真人
+                scroll_distance = random.randint(200, 800)
                 current_position += scroll_distance
-                self.page.evaluate(f"window.scrollTo(0, {current_position})")
-                time.sleep(random.uniform(0.3, 0.8))
+                
+                # 使用平滑滚动
+                self.page.evaluate(f"window.scrollTo({{top: {current_position}, behavior: 'smooth'}})")
+                
+                # 随机停顿时间，模拟阅读
+                pause_time = random.uniform(0.5, 2.0)
+                time.sleep(pause_time)
+                
+                # 偶尔向上滚动一点（模拟回看）
+                if random.random() < 0.2:  # 20% 概率
+                    back_scroll = random.randint(50, 200)
+                    current_position = max(0, current_position - back_scroll)
+                    self.page.evaluate(f"window.scrollTo({{top: {current_position}, behavior: 'smooth'}})")
+                    time.sleep(random.uniform(0.3, 0.8))
+                
                 scroll_count += 1
                 
                 new_height = self.page.evaluate("document.body.scrollHeight")
@@ -434,7 +450,11 @@ class CTO51Crawler:
                     'content': []
                 }
                 
-                logger.info(f"Opening article: {title}")
+                logger.info(f"📖 Opening article: {title}")
+                
+                # 随机等待一下再打开文章，模拟思考时间
+                think_time = random.uniform(1, 3)
+                time.sleep(think_time)
                 
                 # Open in new page
                 new_page = self.page.context.new_page()
@@ -453,9 +473,12 @@ class CTO51Crawler:
                     else:
                         return None
                 
-                # Scroll
-                new_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                self._random_delay(1, 2)
+                # 模拟真人阅读：随机滚动
+                scroll_times = random.randint(2, 5)
+                for _ in range(scroll_times):
+                    scroll_pos = random.randint(300, 1000)
+                    new_page.evaluate(f"window.scrollBy({{top: {scroll_pos}, behavior: 'smooth'}})")
+                    time.sleep(random.uniform(0.8, 2.0))  # 模拟阅读时间
                 
                 # Extract author
                 try:
@@ -508,8 +531,12 @@ class CTO51Crawler:
                 
                 formatted_article = self._format_article(article_data)
                 
+                # 关闭前随机停留一下，模拟真人
+                time.sleep(random.uniform(1, 3))
                 new_page.close()
-                self._random_delay(1, 2)
+                
+                # 关闭后随机等待
+                self._random_delay(2, 4)
                 
                 return formatted_article
                 
@@ -559,8 +586,18 @@ class CTO51Crawler:
             self.setup_browser()
             logger.info(f"Visiting list page: {self.base_url}")
             self.page.goto(self.base_url, wait_until='domcontentloaded')
-            logger.info("List page loaded")
+            logger.info("✅ List page loaded")
+            
+            # 首次加载后，模拟真人浏览行为
+            logger.info("🤔 Simulating human browsing behavior...")
             self._random_delay(3, 6)
+            
+            # 随机移动鼠标（模拟真人）
+            try:
+                self.page.mouse.move(random.randint(100, 500), random.randint(100, 500))
+                time.sleep(random.uniform(0.5, 1.5))
+            except:
+                pass
             
             page_count = 1
             old_pages = 0
@@ -617,8 +654,9 @@ class CTO51Crawler:
                                 batch_articles.clear()
                         
                         if i < len(article_elements):
-                            wait_time = random.uniform(2, 5)
-                            logger.info(f"Waiting {wait_time:.1f} seconds...")
+                            # 随机等待时间，模拟真人浏览间隔
+                            wait_time = random.uniform(3, 8)  # 增加间隔时间
+                            logger.info(f"⏱️  Waiting {wait_time:.1f} seconds before next article...")
                             time.sleep(wait_time)
                     
                     logger.info(f"\n{'='*60}")
@@ -629,9 +667,10 @@ class CTO51Crawler:
                     logger.warning(f"⚠️ Reached max pages limit: {max_pages}")
                     break
                 
-                logger.info(f"\nPreparing to go to next page...")
-                wait_time = random.uniform(3, 6)
-                logger.info(f"Waiting {wait_time:.1f} seconds before turning page...")
+                logger.info(f"\n📄 Preparing to go to next page...")
+                # 翻页前随机等待更长时间，模拟真人浏览
+                wait_time = random.uniform(5, 10)  # 增加翻页间隔
+                logger.info(f"⏱️  Waiting {wait_time:.1f} seconds before turning page...")
                 time.sleep(wait_time)
                 
                 if not self._click_next_page():
