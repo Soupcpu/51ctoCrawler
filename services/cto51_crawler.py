@@ -5,6 +5,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 import time
 import random
 import hashlib
@@ -103,7 +105,16 @@ class CTO51Crawler:
         options.add_argument('--log-level=3')  # 只显示严重错误
         options.add_argument('--silent')
         
-        self.driver = webdriver.Chrome(options=options)
+        # Use webdriver-manager to automatically manage ChromeDriver
+        try:
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
+        except Exception as e:
+            logger.warning(f"Failed to use webdriver-manager: {e}")
+            logger.info("Trying to use system Chrome...")
+            # Fallback to system Chrome
+            self.driver = webdriver.Chrome(options=options)
+        
         self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
         })
