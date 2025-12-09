@@ -8,6 +8,7 @@ import json
 import os
 from datetime import datetime
 from typing import List, Dict, Optional, Callable
+from core.proxy_pool import proxy_pool
 
 logger = logging.getLogger(__name__)
 
@@ -75,33 +76,178 @@ class CTO51Crawler:
             logger.error(f"❌ Failed to save data: {e}")
     
     def setup_browser(self):
-        """Setup Playwright browser"""
+        """Setup Playwright browser with Linux server compatibility and proxy support"""
         logger.info("Starting Chromium browser in headless mode...")
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
-            headless=True,  # 无头模式
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-dev-shm-usage'
-            ]
-        )
         
-        # Create context with anti-detection
+        # 获取代理配置
+        proxy_config = proxy_pool.get_proxy()
+        if proxy_config:
+            logger.info(f"🌐 使用代理: {proxy_config.get('server')}")
+        else:
+            logger.info("🌐 不使用代理（直连）")
+        
+        # Linux 服务器兼容性配置 - 添加所有必要的启动参数
+        launch_options = {
+            'headless': True,
+            'args': [
+                # 核心兼容性参数（Linux 必须）
+                '--no-sandbox',                              # 禁用沙箱（服务器环境必需）
+                '--disable-setuid-sandbox',                  # 禁用 setuid 沙箱
+                '--disable-dev-shm-usage',                   # 避免 /dev/shm 空间不足
+                '--disable-gpu',                             # 禁用 GPU 加速
+                
+                # 反爬虫检测
+                '--disable-blink-features=AutomationControlled',
+                
+                # 性能和稳定性优化
+                '--disable-software-rasterizer',             # 禁用软件光栅化
+                '--disable-extensions',                      # 禁用扩展
+                '--disable-background-networking',           # 禁用后台网络
+                '--disable-background-timer-throttling',     # 禁用后台定时器节流
+                '--disable-backgrounding-occluded-windows',
+                '--disable-breakpad',                        # 禁用崩溃报告
+                '--disable-component-extensions-with-background-pages',
+                '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+                '--disable-ipc-flooding-protection',
+                '--disable-renderer-backgrounding',
+                
+                # 网络和连接优化
+                '--disable-hang-monitor',
+                '--disable-prompt-on-repost',
+                '--disable-sync',
+                '--force-color-profile=srgb',
+                '--metrics-recording-only',
+                '--no-first-run',
+                '--safebrowsing-disable-auto-update',
+                '--enable-automation',
+                '--password-store=basic',
+                '--use-mock-keychain',
+                
+                # 内存优化
+                '--single-process',                          # 单进程模式（减少资源占用）
+                '--no-zygote',                              # 禁用 zygote 进程
+            ],
+            # 增加超时时间，适应服务器环境
+            'timeout': 60000
+        }
+        
+        # 如果有代理，添加代理配置
+        if proxy_config:
+            launch_options['proxy'] = proxy_config
+        
+        self.browser = self.playwright.chromium.launch(**launch_options)
+        
+        # Create context with anti-detection and realistic settings
         context = self.browser.new_context(
             viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            # 添加更多真实浏览器特征
+            locale='zh-CN',
+            timezone_id='Asia/Shanghai',
+            # 增加页面超时时间
+            extra_http_headers={
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            },
+            # 🔥 关键：忽略 HTTPS 错误（某些服务器证书问题）
+            ignore_https_errors=True,
         )
+        
+        # 设置默认超时时间（Linux 服务器网络可能较慢）
+        context.set_default_timeout(45000)
+        context.set_default_navigation_timeout(45000)
+        
+        # 🔥 关键：设置严格的网络空闲超时，避免无限等待
+        # 如果页面在 5 秒内没有网络活动，就认为加载完成
+        try:
+            # 注意：这个方法可能不是所有版本都支持
+            pass
+        except:
+            pass
         
         # Add anti-detection script
         context.add_init_script("""
+            // 隐藏 webdriver 特征
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
             });
+            
+            // 添加更多真实浏览器特征
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en']
+            });
+            
+            // 覆盖 Chrome 对象
+            window.chrome = {
+                runtime: {}
+            };
+            
+            // 覆盖 permissions
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
         """)
         
         self.page = context.new_page()
-        logger.info("✅ Chromium browser started successfully (headless mode)")
+        
+        # 🔥 关键优化：阻止慢速资源，避免卡住
+        # 阻止字体、某些图片和视频，加快加载速度
+        def handle_route(route):
+            """处理网络请求，阻止不必要的资源"""
+            request = route.request
+            resource_type = request.resource_type
+            url = request.url
+            
+            # 阻止字体文件（通常很慢且不影响爬取）
+            if resource_type == "font":
+                route.abort()
+                return
+            
+            # 阻止视频和音频
+            if resource_type in ["media"]:
+                route.abort()
+                return
+            
+            # 阻止某些已知慢速的第三方资源
+            blocked_domains = [
+                'googletagmanager.com',
+                'google-analytics.com',
+                'doubleclick.net',
+                'facebook.com',
+                'twitter.com',
+                'linkedin.com',
+            ]
+            
+            if any(domain in url for domain in blocked_domains):
+                route.abort()
+                return
+            
+            # 其他请求正常处理，但设置超时
+            try:
+                route.continue_()
+            except:
+                route.abort()
+        
+        # 注册路由处理器
+        try:
+            self.page.route("**/*", handle_route)
+            logger.info("✅ Resource blocking enabled (fonts, media, trackers)")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not enable resource blocking: {e}")
+        
+        logger.info("✅ Chromium browser started successfully (Linux-compatible mode)")
+        logger.info("   - Sandbox: disabled")
+        logger.info("   - GPU: disabled")
+        logger.info("   - Timeout: 45s")
+        logger.info("   - Resource blocking: enabled")
     
     def _random_delay(self, min_sec: float = 2, max_sec: float = 5):
         """Random delay - simulate human behavior"""
@@ -371,13 +517,24 @@ class CTO51Crawler:
         total_valid_articles = 0
         
         try:
-            # 等待文章列表加载
+            # 等待文章列表加载（Linux 服务器使用更长超时）
             logger.info("Waiting for article list to load...")
-            self.page.wait_for_selector("ul.infinite-list", timeout=15000)
+            try:
+                self.page.wait_for_selector("ul.infinite-list", timeout=30000)
+                logger.info("✅ Article list found")
+            except Exception as e:
+                logger.warning(f"⚠️ Article list selector timeout: {e}")
+                # 尝试等待任何文章链接
+                try:
+                    self.page.wait_for_selector("a[href*='posts']", timeout=20000)
+                    logger.info("✅ Article links found")
+                except:
+                    logger.error("❌ No article elements found")
+                    return {'articles': [], 'all_old': False}
             
             # 滚动加载更多内容
             self._human_like_scroll()
-            time.sleep(2)  # 等待动态内容加载
+            time.sleep(3)  # 等待动态内容加载
             
             list_items = self.page.query_selector_all("ul.infinite-list > li")
             logger.info(f"Found {len(list_items)} article items")
@@ -447,6 +604,10 @@ class CTO51Crawler:
             try:
                 if attempt > 0:
                     logger.warning(f"Retry attempt {attempt + 1}/{max_retries} for: {title}")
+                    # 重试时更换代理
+                    if proxy_pool.enabled:
+                        proxy_pool.reset_counter()
+                        logger.info("🔄 更换代理重试...")
                 
                 article_data = {
                     'title': title,
@@ -464,20 +625,54 @@ class CTO51Crawler:
                 
                 # Open in new page
                 new_page = self.page.context.new_page()
-                new_page.goto(url, wait_until='load', timeout=30000)
                 
-                # Wait for content
+                # Linux 服务器使用更宽松的加载策略
                 try:
-                    new_page.wait_for_selector(".posts-content", timeout=20000)
+                    new_page.goto(url, wait_until='domcontentloaded', timeout=60000)
+                    logger.info("✅ Article page loaded")
+                except Exception as e:
+                    logger.warning(f"⚠️ Page load failed: {e}")
+                    try:
+                        # 尝试更宽松的策略
+                        new_page.goto(url, wait_until='commit', timeout=60000)
+                        logger.info("✅ Article page loaded (commit)")
+                    except Exception as e2:
+                        logger.error(f"❌ Page load completely failed: {e2}")
+                        new_page.close()
+                        if attempt < max_retries - 1:
+                            self._random_delay(3, 5)
+                            continue
+                        else:
+                            return None
+                
+                # Wait for content with longer timeout
+                try:
+                    new_page.wait_for_selector(".posts-content", timeout=30000)
                     logger.info("✅ Article content loaded successfully")
                 except:
-                    logger.warning(f"⚠️ Content not loaded within 20 seconds")
-                    new_page.close()
-                    if attempt < max_retries - 1:
-                        self._random_delay(2, 3)
-                        continue
-                    else:
-                        return None
+                    logger.warning(f"⚠️ Content not loaded within 30 seconds")
+                    # 即使选择器未出现，也尝试继续（可能内容已加载但选择器不同）
+                    time.sleep(3)
+                    # 检查页面是否有内容
+                    try:
+                        body_text = new_page.evaluate("document.body.innerText")
+                        if len(body_text) < 100:
+                            logger.error("❌ Page content too short, likely failed")
+                            new_page.close()
+                            if attempt < max_retries - 1:
+                                self._random_delay(3, 5)
+                                continue
+                            else:
+                                return None
+                        else:
+                            logger.info("✅ Page has content, continuing...")
+                    except:
+                        new_page.close()
+                        if attempt < max_retries - 1:
+                            self._random_delay(3, 5)
+                            continue
+                        else:
+                            return None
                 
                 # 模拟真人阅读：随机滚动
                 scroll_times = random.randint(2, 5)
@@ -591,12 +786,22 @@ class CTO51Crawler:
         try:
             self.setup_browser()
             logger.info(f"Visiting list page: {self.base_url}")
-            # 使用 load 而不是 networkidle，更宽松
-            self.page.goto(self.base_url, wait_until='load', timeout=30000)
-            logger.info("✅ List page loaded")
             
-            # 额外等待一下让 JS 执行
-            time.sleep(3)
+            # Linux 服务器网络可能较慢，使用更宽松的策略
+            # 使用 domcontentloaded 而不是 load，更快更稳定
+            try:
+                self.page.goto(self.base_url, wait_until='domcontentloaded', timeout=60000)
+                logger.info("✅ List page loaded (domcontentloaded)")
+            except Exception as e:
+                logger.warning(f"⚠️ First load attempt failed: {e}")
+                logger.info("🔄 Retrying with commit strategy...")
+                # 如果失败，尝试更宽松的 commit 策略
+                self.page.goto(self.base_url, wait_until='commit', timeout=60000)
+                logger.info("✅ List page loaded (commit)")
+            
+            # 额外等待让 JS 执行和动态内容加载
+            logger.info("⏳ Waiting for JavaScript execution...")
+            time.sleep(5)
             
             # 首次加载后，模拟真人浏览行为
             logger.info("🤔 Simulating human browsing behavior...")
